@@ -1,0 +1,21 @@
+#include <tunables/global>
+profile qemu-kguard /usr/bin/qemu-system-x86_64 flags=(attach_disconnected) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  capability net_admin,
+  capability net_raw,
+  capability setuid,
+  capability setgid,
+  /usr/bin/qemu-system-x86_64 mr,
+  /dev/kvm rw,
+  /dev/net/tun rw,
+  # device enumeration + fd access QEMU needs (Plan C tightens these)
+  @{PROC}/ r,
+  @{PROC}/** r,
+  /sys/bus/** r,
+  /sys/devices/** r,
+  /sys/class/** r,
+  /var/lib/whonix-runner/** rwk,
+  /var/lib/whonix-images/** r,
+  owner /tmp/** rwk,
+}

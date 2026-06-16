@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+printf '%s\n' "sha256sum $*" >> "${MOCK_LOG:-/dev/null}"
+for a in "$@"; do [[ "$a" == -* ]] && continue; printf 'deadbeef  %s\n' "$a"; done
+exit 0

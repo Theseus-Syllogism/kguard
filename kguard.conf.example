@@ -1,0 +1,6 @@
+# kicksecure-guard host-local config (example). Copy to /etc/kguard.conf or
+# ~/.config/kguard.conf, or point KGUARD_CONFIG at it. ':=' so explicit env still wins.
+: "${KGUARD_HOME:=/var/lib/kguard}"
+: "${KGUARD_STAGE:=/var/lib/whonix-images}"
+: "${KGUARD_IMG:=/var/lib/kguard-images/kicksecure-guard.qcow2}"
+# : "${KGUARD_MEM:=10240}"; : "${KGUARD_SMP:=4}"

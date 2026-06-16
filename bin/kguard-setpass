@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# Optional host-local config (untracked): set KGUARD_HOME/KGUARD_STAGE/etc. without editing
+# the repo. Sourced before the library so its ':=' defaults fill only still-unset values —
+# anything already in the environment wins. Override the search with KGUARD_CONFIG=<file>.
+for _kg_cfg in "${KGUARD_CONFIG:-}" /etc/kguard.conf "${XDG_CONFIG_HOME:-${HOME:-}/.config}/kguard.conf"; do
+  # shellcheck source=/dev/null
+  if [[ -n "$_kg_cfg" && -r "$_kg_cfg" ]]; then source "$_kg_cfg"; fi
+done
+unset _kg_cfg
+# shellcheck source=../lib/kguard-common.sh
+source "$SELF_DIR/../lib/kguard-common.sh"
+
+read_secret() {
+  local p
+  # `|| true`: on EOF (Ctrl-D / no input) read returns nonzero; without the guard
+  # `set -e` would abort here instead of falling through to the "must not be empty" check.
+  if [[ "${KGUARD_SETPASS_STDIN:-}" == "1" ]]; then IFS= read -r p || true
+  else read -rs -p "$1" p < /dev/tty || true; echo >&2; fi
+  printf '%s' "$p"
+}
+
+main() {
+  local p1 p2
+  p1="$(read_secret 'Kicksecure-guard LUKS passphrase: ')"
+  p2="$(read_secret 'Repeat passphrase: ')"
+  [[ -n "$p1" ]] || { echo "passphrase must not be empty" >&2; exit 1; }
+  [[ "$p1" == "$p2" ]] || { echo "passphrases do not match" >&2; exit 1; }
+  if [[ -e "$(kg_overlay)" ]]; then
+    echo "Encrypted overlay exists. Changing the password requires 'kguard reset'" >&2
+    echo "(discards guard state), then run kguard-setpass again before 'kguard start'." >&2
+    exit 4
+  fi
+  mkdir -p "$KGUARD_HOME"; chmod 700 "$KGUARD_HOME"
+  local kf; kf="$(kg_keyfile)"
+  ( umask 077; printf '%s' "$p1" > "$kf" ); chmod 600 "$kf"
+  echo "Keyfile written: $kf (0600). Run 'kguard start' to boot." >&2
+}
+main "$@"

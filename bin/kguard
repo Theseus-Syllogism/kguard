@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# Optional host-local config (untracked): set KGUARD_HOME/KGUARD_STAGE/etc. without editing
+# the repo. Sourced before the library so its ':=' defaults fill only still-unset values —
+# anything already in the environment wins. Override the search with KGUARD_CONFIG=<file>.
+for _kg_cfg in "${KGUARD_CONFIG:-}" /etc/kguard.conf "${XDG_CONFIG_HOME:-${HOME:-}/.config}/kguard.conf"; do
+  # shellcheck source=/dev/null
+  if [[ -n "$_kg_cfg" && -r "$_kg_cfg" ]]; then source "$_kg_cfg"; fi
+done
+unset _kg_cfg
+# shellcheck source=../lib/kguard-common.sh
+source "$SELF_DIR/../lib/kguard-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: kguard <command>
+  start                boot the Kicksecure guard VM (headless; VNC over UNIX socket)
+  stop                 graceful QMP shutdown, then SIGKILL after timeout
+  status               show VM / PID / VNC / overlay state
+  health               show guard status (IPS drops, cowrie hits, nested VMs)
+  view [guard|ws]      open the guard console (ws = nested Whonix workstation; Plan C)
+  reset                stop and delete overlay + state disk (fresh next boot)
+  passwd               alias for kguard-setpass
+  setup                run the interactive setup wizard (setup.sh)
+EOF
+}
+
+is_running() {
+  local pf pid; pf="$(kg_pidfile)"
+  [[ -f "$pf" ]] || return 1
+  pid="$(cat "$pf")"; [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  local cmdline; cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || return 1
+  [[ "$cmdline" == *"qemu-system"* ]] && [[ "$cmdline" == *"kicksecure-guard"* ]]
+}
+
+launch() {
+  local out; out="$(kg_qemu_argv)" || { echo "kguard: failed to build argv" >&2; return 1; }
+  local -a argv; mapfile -t argv <<<"$out"
+  [[ "${argv[0]:-}" == qemu-system-* ]] || { echo "kguard: refusing malformed argv" >&2; return 1; }
+  ( umask 077; "${argv[@]}" 9>&- )
+}
+
+cmd_start() {
+  kg_check_keyfile_perms || exit $?
+  mkdir -p "$KGUARD_HOME" "$KGUARD_CONFIG_SHARE"; chmod 700 "$KGUARD_HOME" "$KGUARD_CONFIG_SHARE"
+  kg_create_overlay; kg_create_state_disk
+  # Reuse the guard passphrase for the nested Whonix overlays: deliver the key into the RO
+  # kguard-config 9p share so the guest installs it at boot (the guest never sees $KGUARD_HOME).
+  install -m 600 "$(kg_keyfile)" "$(kg_config_keyfile)"
+  if ! is_running; then launch; fi
+  echo "Started (headless). VNC: $(kg_vnc_sock)" >&2
+  echo "View: kguard view   |  Remote: ssh -L 5903:$(kg_vnc_sock) <host>" >&2
+}
+
+cmd_stop() {
+  local pf pid; pf="$(kg_pidfile)"
+  if is_running; then
+    command -v socat >/dev/null && printf '%s\n' '{"execute":"qmp_capabilities"}' '{"execute":"system_powerdown"}' \
+      | socat - "UNIX-CONNECT:$(kg_qmp)" >/dev/null 2>&1 || true
+    local n=0; while (( n < KGUARD_STOP_TIMEOUT )) && is_running; do sleep 1; n=$((n+1)); done
+  fi
+  if [[ -f "$pf" ]] && pid="$(cat "$pf")" && [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true; sleep 2
+    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pf" "$(kg_qmp)" "$(kg_vnc_sock)"
+  echo "Stopped." >&2
+}
+
+cmd_status() {
+  printf '%-16s %-8s %-16s %-10s\n' ROLE STATE VNC OVERLAY
+  local state vnc ov sz
+  is_running && state=running || state=stopped
+  vnc="$(kg_vnc_sock)"; [[ -S "$vnc" ]] && vnc="$(basename "$vnc")" || vnc="-"
+  ov="$(kg_overlay)"; [[ -e "$ov" ]] && sz="$(du -h "$ov" | cut -f1)" || sz="-"
+  printf '%-16s %-8s %-16s %-10s\n' "kicksecure-guard" "$state" "$vnc" "$sz"
+}
+
+cmd_health() {
+  if ! is_running; then echo "kicksecure-guard: not running" >&2; return 0; fi
+  echo "kicksecure-guard health:"
+  echo "  nested VMs : $(kg_qga_exec 'whonix status 2>/dev/null | tail -n +2 | tr "\n" ";"' || echo '?')"
+  echo "  suricata-ips: $(kg_qga_exec 'systemctl is-active suricata-ips' || echo '?')"
+  echo "  IPS drops  : $(kg_qga_exec 'grep -c -i drop /var/log/suricata/fast.log 2>/dev/null || echo 0' || echo '?')"
+  echo "  cowrie hits: $(kg_qga_exec 'wc -l < /opt/cowrie/var/log/cowrie/cowrie.json 2>/dev/null || echo 0' || echo '?')"
+}
+
+cmd_view() {
+  local role="${1:-guard}" sock port
+  case "$role" in
+    guard) sock="$(kg_vnc_sock)"; port=5903;;
+    ws)
+      is_running || echo "warning: guard is not running (recipe shown anyway)" >&2
+      echo "Nested Whonix Workstation console is a UNIX socket inside the guard (L1):" >&2
+      echo "  /var/lib/whonix-runner/ws-vnc.sock" >&2
+      echo "Two-hop forward to view it:" >&2
+      echo "  1) in L1:  socat TCP-LISTEN:5902,bind=127.0.0.1,fork UNIX-CONNECT:/var/lib/whonix-runner/ws-vnc.sock" >&2
+      echo "  2) host:   ssh -L 5902:127.0.0.1:5902 <l1-addr>  then point a VNC client at 127.0.0.1:5902" >&2
+      return 0
+      ;;
+    *)     echo "view: unknown role '$role' (use guard|ws)" >&2; return 2;;
+  esac
+  is_running || echo "warning: guard is not running" >&2
+  if [[ -z "${DISPLAY:-}" ]] || ! command -v vncviewer >/dev/null; then
+    echo "No local display. From your workstation:" >&2
+    echo "  ssh -L $port:$sock <host>   then VNC to 127.0.0.1:$port" >&2
+    return 0
+  fi
+  [[ -S "$sock" ]] || { echo "view: VNC socket $sock not present (started?)" >&2; return 1; }
+  local bport; bport="$(shuf -i 5950-5999 -n1)"
+  socat "TCP-LISTEN:$bport,bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:$sock" & local sp=$!
+  sleep 0.3; vncviewer "127.0.0.1:$bport" || true; kill "$sp" 2>/dev/null || true
+}
+
+cmd_reset() {
+  is_running && cmd_stop || true
+  rm -f "$(kg_overlay)" "$(kg_state_disk)" "$(kg_pidfile)" "$(kg_qmp)" "$(kg_logfile)" "$(kg_vnc_sock)"
+  echo "Overlay + state disk removed; next start boots fresh (encrypted)." >&2
+}
+
+main() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    start|stop|reset)
+      mkdir -p "$KGUARD_HOME"; chmod 700 "$KGUARD_HOME"
+      exec 9>"$KGUARD_HOME/kguard.lock"
+      flock -n 9 || { echo "kguard: another start/stop/reset is in progress" >&2; exit 75; }
+      ;;
+  esac
+  case "$sub" in
+    start)  cmd_start "$@";;
+    stop)   cmd_stop "$@";;
+    status) cmd_status "$@";;
+    health) cmd_health "$@";;
+    view)   cmd_view "$@";;
+    reset)  cmd_reset "$@";;
+    passwd) exec "$SELF_DIR/kguard-setpass";;
+    setup)  exec "$SELF_DIR/../setup.sh";;
+    ""|-h|--help) usage; [[ "$sub" == "" ]] && exit 2 || exit 0;;
+    *) echo "unknown command: $sub" >&2; usage; exit 2;;
+  esac
+}
+main "$@"

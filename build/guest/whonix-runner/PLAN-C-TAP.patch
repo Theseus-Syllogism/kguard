@@ -1,0 +1,19 @@
+# PLAN-C-TAP.patch — applied to the vendored whonix-runner lib/whonix-common.sh
+# In wh_qemu_argv()'s gateway branch, replace:
+#   -netdev "user,id=ext,net=10.0.2.0/24"
+#   -device "virtio-net-pci,netdev=ext,mac=52:54:00:a1:b2:01"
+# with the TAP uplink (the bridge/TAP kg-gw0 is created by kguard-net.service):
+#   -netdev "tap,id=ext,ifname=kg-gw0,script=no,downscript=no"
+#   -device "virtio-net-pci,netdev=ext,mac=52:54:00:a1:b2:01"
+# Rationale: route nested Whonix egress through L1's kernel so Suricata (NFQUEUE 0) inspects it.
+#
+# ADDRESSING — verify at first real boot: stock whonix-runner's SLIRP provided the Gateway's
+# external NIC with DHCP+DNS+gateway (10.0.2.2 / 10.0.2.15). A bare TAP on br-whonix has NO
+# DHCP server. If the Whonix Gateway's external NIC uses DHCP, it will get no address — add a
+# DHCP server on br-whonix (e.g. dnsmasq bound to 10.0.2.2 handing out 10.0.2.0/24) in
+# kguard-net-setup.sh, OR statically configure the Gateway's eth0 (10.0.2.15/24 gw 10.0.2.2).
+# br-whonix already holds 10.0.2.2/24 (the default route the Gateway expects). This is a
+# live-boot verification point, not yet exercised (see build/tests/integration_ips.bats).
+#
+# TODO: convert this file to a real unified diff once the upstream whonix-runner source is
+# vendored into this directory.

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+printf '%s\n' "qemu-img $*" >> "${MOCK_LOG:-/dev/null}"
+case "${1:-}" in create) : > "${@: -1}";; convert) : > "${@: -1}";; esac
+exit 0

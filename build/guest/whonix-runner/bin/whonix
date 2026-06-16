@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# Optional host-local config (untracked): set WHONIX_HOME/WHONIX_STAGE/etc. without editing
+# the repo. Sourced before the library so its ':=' defaults fill only still-unset values —
+# anything already in the environment wins. Override the search with WHONIX_CONFIG=<file>.
+for _wh_cfg in "${WHONIX_CONFIG:-}" /etc/whonix-runner.conf "${XDG_CONFIG_HOME:-${HOME:-}/.config}/whonix-runner.conf"; do
+  # shellcheck source=/dev/null
+  if [[ -n "$_wh_cfg" && -r "$_wh_cfg" ]]; then source "$_wh_cfg"; fi
+done
+unset _wh_cfg
+# shellcheck source=../lib/whonix-common.sh
+source "$SELF_DIR/../lib/whonix-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: whonix <command>
+  start                boot Gateway then Workstation (headless; VNC over UNIX sockets)
+  stop                 graceful QMP shutdown, then SIGKILL after timeout
+  status               show VM / PID / VNC / overlay state
+  view [gw|ws]         open the VNC console for a VM (default: ws)
+  reset                stop and delete overlays (fresh, encrypted next boot)
+  passwd               alias for whonix-setpass
+EOF
+}
+
+is_running() {
+  local pf pid role="$1"; pf="$(wh_pidfile "$role")"
+  [[ -f "$pf" ]] || return 1
+  pid="$(cat "$pf")"
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  # Validate the process is actually a qemu-system process for this VM, not a PID-reuse.
+  local cmdline; cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || return 1
+  [[ "$cmdline" == *"qemu-system"* ]] && [[ "$cmdline" == *"whonix-$([ "$role" = gw ] && echo gateway || echo workstation)"* ]]
+}
+
+# Stop one VM: TERM, confirm death, escalate to KILL, then remove its runtime artifacts.
+_wh_kill() {
+  local role="$1" pf pid; pf="$(wh_pidfile "$role")"
+  if [[ -f "$pf" ]] && pid="$(cat "$pf")" && [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    local n=0; while (( n < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; n=$((n+1)); done
+    kill -0 "$pid" 2>/dev/null && { echo "escalating to SIGKILL for $role ($pid)" >&2; kill -9 "$pid" 2>/dev/null || true; sleep 1; }
+  fi
+  rm -f "$pf" "$(wh_qmp "$role")" "$(wh_vnc_sock "$role")"
+}
+
+_WH_STARTED=()
+# Kill only the VMs this invocation started (used by the cmd_start failure trap).
+_wh_cleanup_started() { local r; for r in "${_WH_STARTED[@]:-}"; do [[ -n "$r" ]] && _wh_kill "$r"; done; }
+
+launch() {                       # $1 = gw|ws
+  local role="$1" out
+  out="$(wh_qemu_argv "$role")" || { echo "whonix: failed to build argv for $role" >&2; return 1; }
+  local -a argv; mapfile -t argv <<<"$out"
+  [[ "${argv[0]:-}" == qemu-system-* ]] || { echo "whonix: refusing to launch malformed argv for $role" >&2; return 1; }
+  # umask 077 => QMP/VNC sockets, pidfile, any log are owner-only.
+  # 9>&- closes the inherited flock fd so the daemonized qemu does NOT keep the
+  # single-instance lock held (otherwise 'whonix stop'/'reset' deadlock while VMs run).
+  ( umask 077; "${argv[@]}" 9>&- )
+}
+
+cmd_start() {
+  wh_check_keyfile_perms || exit $?
+  chmod 700 "$WHONIX_HOME"
+  wh_create_overlay gw; wh_create_overlay ws
+  rm -f "$(wh_int_sock)"                          # stale link socket from a prior crash
+  _WH_STARTED=()
+  # Tear down only what THIS invocation started if we bail out before completing.
+  trap 'rc=$?; (( rc == 0 )) || _wh_cleanup_started' EXIT
+  if ! is_running gw; then launch gw && _WH_STARTED+=(gw); fi
+  wh_wait_internal_listener
+  if ! is_running ws; then launch ws && _WH_STARTED+=(ws); fi
+  trap - EXIT
+  echo "Started (headless). VNC UNIX sockets:" >&2
+  echo "  gateway     $(wh_vnc_sock gw)" >&2
+  echo "  workstation $(wh_vnc_sock ws)" >&2
+  echo "View locally: whonix view ws   |  Remote: ssh -L 5902:$(wh_vnc_sock ws) <host>, then VNC to 127.0.0.1:5902" >&2
+}
+
+cmd_stop() {
+  local role
+  for role in ws gw; do
+    is_running "$role" && wh_qmp_powerdown "$role" || true
+  done
+  local waited=0
+  while (( waited < WHONIX_STOP_TIMEOUT )); do
+    is_running gw || is_running ws || break
+    sleep 1; waited=$((waited+1))
+  done
+  for role in ws gw; do _wh_kill "$role"; done   # confirms death + escalates + cleans up
+  rm -f "$(wh_int_sock)"
+  echo "Stopped." >&2
+}
+
+cmd_status() {
+  printf '%-12s %-8s %-18s %-10s\n' ROLE STATE VNC OVERLAY
+  local role state name vnc ov sz
+  for role in gw ws; do
+    is_running "$role" && state=running || state=stopped
+    [[ "$role" == gw ]] && name=gateway || name=workstation
+    vnc="$(wh_vnc_sock "$role")"; [[ -S "$vnc" ]] && vnc="$(basename "$vnc")" || vnc="-"
+    ov="$(wh_overlay "$role")"; [[ -e "$ov" ]] && sz="$(du -h "$ov" | cut -f1)" || sz="-"
+    printf '%-12s %-8s %-18s %-10s\n' "$name" "$state" "$vnc" "$sz"
+  done
+}
+
+cmd_view() {
+  local role="${1:-ws}" sock port
+  case "$role" in
+    gw) port=5901;;
+    ws) port=5902;;
+    *)  echo "view: unknown role '$role' (use gw|ws)" >&2; return 2;;
+  esac
+  sock="$(wh_vnc_sock "$role")"
+  is_running "$role" || echo "warning: $role is not running" >&2
+  # Without a local X display (e.g. over SSH) we cannot open a viewer here — guide the user.
+  if [[ -z "${DISPLAY:-}" ]] || ! command -v vncviewer >/dev/null; then
+    echo "No local display for a VNC viewer. From your workstation:" >&2
+    echo "  ssh -L $port:$sock <host>     then point a VNC client at 127.0.0.1:$port" >&2
+    return 0
+  fi
+  [[ -S "$sock" ]] || { echo "view: VNC socket $sock not present (is $role started?)" >&2; return 1; }
+  # Bridge the UNIX socket to a transient loopback port for the viewer.
+  local bport; bport="$(shuf -i 5950-5999 -n1)"
+  socat "TCP-LISTEN:$bport,bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:$sock" & local sp=$!
+  sleep 0.3
+  vncviewer "127.0.0.1:$bport" || true
+  kill "$sp" 2>/dev/null || true
+}
+
+cmd_reset() {
+  if is_running gw || is_running ws; then cmd_stop; fi
+  rm -f "$(wh_overlay gw)" "$(wh_overlay ws)"
+  # Clean residual runtime artifacts so stale state can't cause a false is_running.
+  local role
+  for role in gw ws; do
+    rm -f "$(wh_pidfile "$role")" "$(wh_qmp "$role")" "$(wh_logfile "$role")" "$(wh_vnc_sock "$role")"
+  done
+  rm -f "$(wh_int_sock)"
+  echo "Overlays removed; next start boots fresh (encrypted)." >&2
+}
+
+main() {
+  local sub="${1:-}"; shift || true
+  # Serialize mutating verbs so concurrent invocations can't race on the same VMs/overlays.
+  case "$sub" in
+    start|stop|reset)
+      mkdir -p "$WHONIX_HOME"; chmod 700 "$WHONIX_HOME"
+      exec 9>"$WHONIX_HOME/whonix.lock"
+      flock -n 9 || { echo "whonix: another start/stop/reset is in progress" >&2; exit 75; }
+      ;;
+  esac
+  case "$sub" in
+    start)  cmd_start "$@";;
+    stop)   cmd_stop "$@";;
+    status) cmd_status "$@";;
+    view)   cmd_view "$@";;
+    reset)  cmd_reset "$@";;
+    passwd) exec "$SELF_DIR/whonix-setpass";;
+    ""|-h|--help) usage; [[ "$sub" == "" ]] && exit 2 || exit 0;;
+    *) echo "unknown command: $sub" >&2; usage; exit 2;;
+  esac
+}
+main "$@"

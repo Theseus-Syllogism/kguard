@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+printf '%s\n' "curl $*" >> "${MOCK_LOG:-/dev/null}"
+out=""; prev=""
+for a in "$@"; do [[ "$prev" == "-o" || "$prev" == "--output" ]] && out="$a"; prev="$a"; done
+[[ -n "$out" ]] && printf 'mock-downloaded-content\n' > "$out"
+exit 0

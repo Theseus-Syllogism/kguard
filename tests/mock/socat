@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+printf '%s\n' "socat $*" >> "${MOCK_LOG:-/dev/null}"
+# minimal canned QMP replies (not a full agent emulation)
+printf '{"return":{"pid":1}}\n'
+exit 0

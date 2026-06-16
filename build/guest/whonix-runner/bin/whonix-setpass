@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# Optional host-local config (untracked) — see bin/whonix. Sourced before the library so its
+# ':=' defaults fill only still-unset values; anything already in the environment wins.
+for _wh_cfg in "${WHONIX_CONFIG:-}" /etc/whonix-runner.conf "${XDG_CONFIG_HOME:-${HOME:-}/.config}/whonix-runner.conf"; do
+  # shellcheck source=/dev/null
+  if [[ -n "$_wh_cfg" && -r "$_wh_cfg" ]]; then source "$_wh_cfg"; fi
+done
+unset _wh_cfg
+# shellcheck source=../lib/whonix-common.sh
+source "$SELF_DIR/../lib/whonix-common.sh"
+
+read_secret() {  # $1 = prompt; the stdin path is test-only (requires a live bats context)
+  local p
+  if [[ "${WHONIX_SETPASS_STDIN:-}" == "1" && -n "${BATS_TEST_TMPDIR:-}" ]]; then IFS= read -r p
+  else read -rs -p "$1" p < /dev/tty; echo >&2; fi
+  printf '%s' "$p"
+}
+
+main() {
+  local p1 p2
+  p1="$(read_secret 'Whonix LUKS passphrase: ')"
+  p2="$(read_secret 'Repeat passphrase: ')"
+  [[ -n "$p1" ]] || { echo "passphrase must not be empty" >&2; exit 1; }
+  [[ "$p1" == "$p2" ]] || { echo "passphrases do not match" >&2; exit 1; }
+
+  local kf; kf="$(wh_keyfile)"
+  if [[ -e "$(wh_overlay gw)" || -e "$(wh_overlay ws)" ]]; then
+    echo "Encrypted overlays already exist." >&2
+    echo "Changing the password requires 'whonix reset' (discards session state)," >&2
+    echo "then run whonix-setpass again before 'whonix start'." >&2
+    exit 4
+  fi
+  mkdir -p "$WHONIX_HOME"; chmod 700 "$WHONIX_HOME"
+  ( umask 077; printf '%s' "$p1" > "$kf" )
+  chmod 600 "$kf"
+  echo "Keyfile written: $kf (0600). Run 'whonix start' to boot." >&2
+}
+main "$@"

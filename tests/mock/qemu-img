@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+printf '%s\n' "qemu-img $*" >> "${MOCK_LOG:-/dev/null}"
+if [[ "${1:-}" == "create" ]]; then : > "${@: -1}"; fi
+exit 0
