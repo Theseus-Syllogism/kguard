@@ -57,11 +57,32 @@ The inline Suricata IPS config and its `suricata -T` validation
 
 ![inline Suricata IPS config + validation](screenshots/suricata-ips.png)
 
+The fail-closed Suricata IPS unit (`-q 0`, no `--queue-bypass`) + the nftables leak-guard
+([`screenshots/suricata-ips-unit.png`](screenshots/suricata-ips-unit.png)):
+
+![Suricata IPS unit + nft leak-guard](screenshots/suricata-ips-unit.png)
+
+OpenSnitch — the per-process egress firewall on L1, systemd-hardened and enabled at bake
+([`screenshots/opensnitch.png`](screenshots/opensnitch.png)):
+
+![OpenSnitch egress firewall](screenshots/opensnitch.png)
+
 The bats test suite ([`screenshots/tests.png`](screenshots/tests.png)):
 
 ![test suite](screenshots/tests.png)
 
-Two more are captured on a real `BUILD_REAL=1` bake + boot (the appliance must be running):
+The hardened base OS — a stock Kicksecure (LXQt) desktop, the foundation the guard VM is built on
+(the guard itself runs headless Kicksecure-CLI; the nested workstation runs Whonix)
+([`screenshots/kicksecure-desktop.png`](screenshots/kicksecure-desktop.png)):
+
+![Kicksecure desktop](screenshots/kicksecure-desktop.png)
+
+…and Kicksecure's security-first first-boot setup
+([`screenshots/kicksecure-setup-wizard.png`](screenshots/kicksecure-setup-wizard.png)):
+
+![Kicksecure first-boot setup](screenshots/kicksecure-setup-wizard.png)
+
+Two more are captured on a real `BUILD_REAL=1` bake + boot of the appliance itself:
 
 - the nested Whonix Workstation desktop (L2) — `screenshots/desktop.png` _(pending a live bake)_
 - the live inline IPS in the booted guard (`suricata-ips` active + NFQUEUE drop counters) —
